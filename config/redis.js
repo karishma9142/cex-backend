@@ -1,5 +1,12 @@
-// const Redis = require("ioredis");
+import Redis from "ioredis";
+import dotenv from 'dotenv';
 
-// const redisClient = new Redis(process.env.REDIS_URI);
+dotenv.config();
 
-// module.exports = redisClient;
+const redis = new Redis(process.env.REDIS_URI);
+console.log("redis working")
+
+
+
+
+export default redis;

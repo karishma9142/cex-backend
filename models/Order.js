@@ -19,8 +19,7 @@ const OrderSchema = new mongoose.Schema({
     },
 
     stockId: {
-        type: mongoose.Schema.ObjectId,
-        required: true
+        type: mongoose.Schema.ObjectId
     },
 
     price: {
@@ -36,8 +35,7 @@ const OrderSchema = new mongoose.Schema({
     },
 
     filledQty: {
-        type: Number,
-        required: true
+        type: Number
     },
 
     status: {

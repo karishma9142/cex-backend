@@ -2,10 +2,10 @@ import express from 'express';
 import { Profile, Signin, Signup } from '../controllers/authController.js';
 import { Auth } from '../middleware/auth.js';
 
-const Router = express.Router();
+const AuthRouter = express.Router();
 
-Router.post('/signup' , Signup);
-Router.post('/signin' , Signin);
-Router.get('/me' ,Auth , Profile)
+AuthRouter.post('/signup' , Signup);
+AuthRouter.post('/signin' , Signin);
+AuthRouter.get('/me' ,Auth , Profile)
 
-export default Router;
+export default AuthRouter;
