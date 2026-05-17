@@ -3,8 +3,10 @@ import userModel from '../models/User.js';
 import bcrypt from 'bcrypt';
 import crypto from "crypto";
 import jwt from 'jsonwebtoken';
+import redis from '../config/redis.js';
 const salt = 10;
 
+const SUPPORTED_ASSETS = ["INR", "BTC", "ETH", "SOL"];
 
 export const userSchema = z.object({
     fullName: z.string({
@@ -65,6 +67,18 @@ export const Signup = async (req, res) => {
         result.data.userName = userName
 
         const newUser = await userModel.create(result.data);
+
+        // ── Auto-create Redis wallet ──────────────────
+        const walletKey = `wallet:${newUser._id}`;
+        const fields = {};
+        for (const asset of SUPPORTED_ASSETS) {
+            fields[`${asset}_available`] = "0";
+            fields[`${asset}_locked`] = "0";
+        }
+        await redis.hset(walletKey, fields);
+        // ─────────────────────────────────────────────
+
+
         const token = jwt.sign({ user_id: newUser._id }, process.env.JWT_SECRET);
         console.log(token);
         return res.status(200).json({
@@ -85,7 +99,7 @@ export const Signin = async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        const findUser = await userModel.findOne({email : email});
+        const findUser = await userModel.findOne({ email: email });
         if (!findUser) {
             return res.status(401).json({
                 msg: "user does not exist signup up first please"
@@ -93,8 +107,8 @@ export const Signin = async (req, res) => {
         }
         // console.log(password);
         // console.log(findUser.password)
-        const cheakPassword = await bcrypt.compare(password , findUser.password);
-        if(!cheakPassword){
+        const cheakPassword = await bcrypt.compare(password, findUser.password);
+        if (!cheakPassword) {
             return res.status(401).json({
                 msg: "wrong password"
             })
@@ -105,14 +119,14 @@ export const Signin = async (req, res) => {
 
         console.log(token);
         return res.status(200).json({
-            msg : "sign in sucessfully" ,
-            token : token
+            msg: "sign in sucessfully",
+            token: token
         })
 
     } catch (error) {
         console.log(error.message);
         res.status(500).json({
-            msg : "internal server error"
+            msg: "internal server error"
         })
     }
 }

@@ -5,6 +5,8 @@ import { connectDb } from './config/db.js';
 import redisClient from './config/redis.js';
 import AuthRouter from './routes/authRoutes.js';
 import OrderRouter from './routes/orderRoutes.js';
+import WalletRouter from './routes/walletRoutes';
+// import WalletRouter from './routes/walletRoutes.js';
 
 dotenv.config();
 connectDb();
@@ -14,8 +16,11 @@ app.use(express.json());
 app.use(cors());
 
 
-app.use('/api/v1/user' , AuthRouterRouter);
-app.use('/api/v1/order' , OrderRouter)
+app.use('/api/v1/user' , AuthRouter);
+app.use('/api/v1/order' , OrderRouter);
+app.use('/api/v1/wallet' , WalletRouter);
+
+
 const port = process.env.PORT || 3000;
 app.listen(port ,() => {
     console.log(`server running on ${port}`)
