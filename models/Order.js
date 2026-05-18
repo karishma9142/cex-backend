@@ -47,7 +47,7 @@ const OrderSchema = new mongoose.Schema({
             "cancelled"
         ],
         default: "open"
-    }
+    },
 },{
     timestamps:true
 });
