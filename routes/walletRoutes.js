@@ -1,20 +1,19 @@
-import express from 'express';
+import express from "express";
 import {
   createWallet,
   getWallet,
   deposit,
   withdraw,
+  getTransactions,
 } from "../controllers/walletController.js";
-import { Auth } from "../middleware/auth.js";
+import { authMiddleware } from "../middleware/auth.js";
 
-const WalletRouter = express.Router();
+const router = express.Router();
 
-// Public — called right after register (no token yet in some flows)
-WalletRouter.post("/create", createWallet);
+router.post("/create",          createWallet);                    // called after register
+router.get("/",                 authMiddleware, getWallet);       // view balances
+router.post("/deposit",         authMiddleware, deposit);         // add funds
+router.post("/withdraw",        authMiddleware, withdraw);        // remove funds
+router.get("/transactions",     authMiddleware, getTransactions); // history
 
-// Protected — user must be logged in
-WalletRouter.get("/",        Auth, getWallet);
-WalletRouter.post("/deposit",  Auth, deposit);
-WalletRouter.post("/withdraw", Auth, withdraw);
-
-export default WalletRouter;
+export default router;

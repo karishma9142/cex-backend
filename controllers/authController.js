@@ -68,15 +68,19 @@ export const Signup = async (req, res) => {
 
         const newUser = await userModel.create(result.data);
 
-        // ── Auto-create Redis wallet ──────────────────
-        const walletKey = `wallet:${newUser._id}`;
+        // ── Create wallet in MongoDB ──────────────
+        const wallet = await WalletModel.create({ userId: user._id });
+
+        // ── Mirror wallet to Redis ────────────────
+        const redisKey = `wallet:${user._id}`;
         const fields = {};
         for (const asset of SUPPORTED_ASSETS) {
             fields[`${asset}_available`] = "0";
             fields[`${asset}_locked`] = "0";
         }
-        await redis.hset(walletKey, fields);
-        // ─────────────────────────────────────────────
+        await redis.hset(redisKey, fields);
+        // ─────────────────────────────────────────
+
 
 
         const token = jwt.sign({ user_id: newUser._id }, process.env.JWT_SECRET);
@@ -113,6 +117,25 @@ export const Signin = async (req, res) => {
                 msg: "wrong password"
             })
         }
+
+        // ── Rebuild Redis wallet if missing ───────
+        // Handles case where Redis was flushed while user was logged out
+        const redisKey = `wallet:${user._id}`;
+        const walletExists = await redis.exists(redisKey);
+        if (!walletExists) {
+            const walletDoc = await WalletModel.findOne({ userId: user._id });
+            if (walletDoc) {
+                const fields = {};
+                for (const asset of SUPPORTED_ASSETS) {
+                    const bal = walletDoc.balances[asset] ?? { available: 0, locked: 0 };
+                    fields[`${asset}_available`] = String(bal.available);
+                    fields[`${asset}_locked`] = String(bal.locked);
+                }
+                await redis.hset(redisKey, fields);
+            }
+        }
+        // ─────────────────────────────────────────
+
         const token = jwt.sign({
             user_id: findUser._id
         }, process.env.JWT_SECRET);
