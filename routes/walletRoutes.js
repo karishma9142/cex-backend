@@ -6,14 +6,14 @@ import {
   withdraw,
   getTransactions,
 } from "../controllers/walletController.js";
-import { authMiddleware } from "../middleware/auth.js";
+import { Auth } from "../middleware/auth.js";
 
-const router = express.Router();
+const walletRouter = express.Router();
 
-router.post("/create",          createWallet);                    // called after register
-router.get("/",                 authMiddleware, getWallet);       // view balances
-router.post("/deposit",         authMiddleware, deposit);         // add funds
-router.post("/withdraw",        authMiddleware, withdraw);        // remove funds
-router.get("/transactions",     authMiddleware, getTransactions); // history
+walletRouter.post("/create",          createWallet);         // called after register
+walletRouter.get("/",                 Auth, getWallet);       // view balances
+walletRouter.post("/deposit",         Auth, deposit);         // add funds
+walletRouter.post("/withdraw",        Auth, withdraw);        // remove funds
+walletRouter.get("/transactions",     Auth, getTransactions); // history
 
-export default router;
+export default walletRouter;

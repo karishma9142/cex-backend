@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 import crypto from "crypto";
 import jwt from 'jsonwebtoken';
 import redis from '../config/redis.js';
+import WalletModel from '../models/Wallet.js';
 const salt = 10;
 
 const SUPPORTED_ASSETS = ["INR", "BTC", "ETH", "SOL"];
@@ -69,10 +70,10 @@ export const Signup = async (req, res) => {
         const newUser = await userModel.create(result.data);
 
         // ── Create wallet in MongoDB ──────────────
-        const wallet = await WalletModel.create({ userId: user._id });
+        const wallet = await WalletModel.create({ userId: newUser._id });
 
         // ── Mirror wallet to Redis ────────────────
-        const redisKey = `wallet:${user._id}`;
+        const redisKey = `wallet:${newUser._id}`;
         const fields = {};
         for (const asset of SUPPORTED_ASSETS) {
             fields[`${asset}_available`] = "0";
@@ -120,10 +121,10 @@ export const Signin = async (req, res) => {
 
         // ── Rebuild Redis wallet if missing ───────
         // Handles case where Redis was flushed while user was logged out
-        const redisKey = `wallet:${user._id}`;
+        const redisKey = `wallet:${findUser._id}`;
         const walletExists = await redis.exists(redisKey);
         if (!walletExists) {
-            const walletDoc = await WalletModel.findOne({ userId: user._id });
+            const walletDoc = await WalletModel.findOne({ userId: findUser._id });
             if (walletDoc) {
                 const fields = {};
                 for (const asset of SUPPORTED_ASSETS) {
