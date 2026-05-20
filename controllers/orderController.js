@@ -1,249 +1,495 @@
-import redis from "../config/redis.js";
-import OrderModel from "../models/Order.js";
-import FillModel from "../models/Fill.js";
+import redis           from "../config/redis.js";
+import OrderModel       from "../models/Order.js";
+import FillModel        from "../models/Fill.js";
+import WalletModel      from "../models/Wallet.js";
+import logger          from "../config/logger.js";
+import { emitOrderbookUpdate, emitTrade, emitOrderUpdate } from "../socket.js";
 
-/**
- * POST /api/orders
- *
- * Body:
- *  userId   – Mongo ObjectId string
- *  side     – "buy" | "sell"
- *  type     – "limit" | "market"
- *  stockId  – Mongo ObjectId string   (used for DB relations)
- *  symbol   – e.g. "BTC/INR"          (used for Redis keys & wallet fields)
- *  price    – number  (required for limit orders)
- *  qty      – number
- */
+// ─────────────────────────────────────────────────────────────
+// INTERNAL HELPERS
+// ─────────────────────────────────────────────────────────────
+
+async function adjustBalance(userId, asset, field, delta) {
+  await redis.hincrbyfloat(`wallet:${userId}`, `${asset}_${field}`, delta);
+  await WalletModel.findOneAndUpdate(
+    { userId },
+    { $inc: { [`balances.${asset}.${field}`]: delta } }
+  );
+}
+ 
+async function settleFill(buyerId, sellerId, asset, tradeQty, tradeCost) {
+  await adjustBalance(buyerId,  "INR",  "locked",    -tradeCost);
+  await adjustBalance(buyerId,  asset,  "available",  tradeQty);
+  await adjustBalance(sellerId, asset,  "locked",    -tradeQty);
+  await adjustBalance(sellerId, "INR",  "available",  tradeCost);
+}
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/orders
+// ─────────────────────────────────────────────────────────────
 export const placeOrder = async (req, res) => {
   try {
-    const { userId, side, type, stockId, symbol, price, qty } = req.body;
-
-    // ────────────────────────────────────────────────
-    // 0. BASIC INPUT VALIDATION
-    // ────────────────────────────────────────────────
-    if (!["buy", "sell"].includes(side)) {
-      return res.status(400).json({ message: "side must be 'buy' or 'sell'" });
-    }
-    if (!["limit", "market"].includes(type)) {
-      return res.status(400).json({ message: "type must be 'limit' or 'market'" });
-    }
-    if (type === "limit" && (price == null || price <= 0)) {
-      return res.status(400).json({ message: "price is required for limit orders" });
-    }
-    if (!qty || qty <= 0) {
-      return res.status(400).json({ message: "qty must be a positive number" });
-    }
-
-    // ────────────────────────────────────────────────
-    // 1. VALIDATE MARKET EXISTS IN REDIS
-    // ────────────────────────────────────────────────
-    const marketExists = await redis.exists(`market:${symbol}`);
-    if (!marketExists) {
-      return res.status(404).json({ message: "Market not found" });
-    }
-
-    // ────────────────────────────────────────────────
-    // 2. FETCH WALLET FROM REDIS
-    // ────────────────────────────────────────────────
+    const userId = req.userId;
+    // body is already validated + sanitised by Zod middleware
+    const { side, type, stockId, symbol, price, qty } = req.body;
+ 
+    const market = await redis.hgetall(`market:${symbol}`);
+    if (!market || Object.keys(market).length === 0)
+      return res.status(404).json({ message: `Market ${symbol} not found` });
+    if (market.status !== "active")
+      return res.status(400).json({ message: `Market ${symbol} is ${market.status}` });
+ 
+    const baseAsset = market.baseAsset;
     const walletKey = `wallet:${userId}`;
-    const wallet = await redis.hgetall(walletKey);
-
-    if (!wallet || Object.keys(wallet).length === 0) {
+    const wallet    = await redis.hgetall(walletKey);
+ 
+    if (!wallet || Object.keys(wallet).length === 0)
       return res.status(404).json({ message: "Wallet not found" });
+ 
+    if (side === "buy" && type === "limit") {
+      const cost         = price * qty;
+      const availableINR = Number(wallet.INR_available ?? 0);
+      if (availableINR < cost)
+        return res.status(400).json({ message: "Insufficient INR", available: availableINR, required: cost });
+      await adjustBalance(userId, "INR", "available", -cost);
+      await adjustBalance(userId, "INR", "locked",     cost);
     }
-
-    const baseAsset = symbol.split("/")[0]; // e.g. "BTC"
-
-    // ────────────────────────────────────────────────
-    // 3. LOCK BALANCE (pre-flight check + reserve)
-    // ────────────────────────────────────────────────
-    if (side === "buy") {
-      if (type === "market") {
-        // For market buys we can't know exact cost upfront.
-        // Reserve a "worst-case" amount or skip pre-lock.
-        // Here we simply verify INR > 0 and lock during fills.
-      } else {
-        const cost = price * qty;
-        const availableINR = Number(wallet.INR_available || 0);
-
-        if (availableINR < cost) {
-          return res.status(400).json({ message: "Insufficient INR balance" });
-        }
-
-        // Lock INR
-        await redis.hincrbyfloat(walletKey, "INR_available", -cost);
-        await redis.hincrbyfloat(walletKey, "INR_locked", cost);
-      }
-    }
-
+ 
     if (side === "sell") {
-      const availableAsset = Number(wallet[`${baseAsset}_available`] || 0);
-
-      if (availableAsset < qty) {
-        return res.status(400).json({ message: `Insufficient ${baseAsset} balance` });
-      }
-
-      // Lock asset
-      await redis.hincrbyfloat(walletKey, `${baseAsset}_available`, -qty);
-      await redis.hincrbyfloat(walletKey, `${baseAsset}_locked`, qty);
+      const availableAsset = Number(wallet[`${baseAsset}_available`] ?? 0);
+      if (availableAsset < qty)
+        return res.status(400).json({ message: `Insufficient ${baseAsset}`, available: availableAsset, required: qty });
+      await adjustBalance(userId, baseAsset, "available", -qty);
+      await adjustBalance(userId, baseAsset, "locked",     qty);
     }
-
-    // ────────────────────────────────────────────────
-    // 4. CREATE TAKER ORDER IN MONGODB
-    // ────────────────────────────────────────────────
+ 
     const takerOrder = await OrderModel.create({
-      userId,
-      side,
-      type,
-      stockId,
+      userId, side, type, stockId, symbol,
       price: type === "limit" ? price : undefined,
-      qty,
-      filledQty: 0,
-      status: "open",
+      qty, filledQty: 0, status: "open",
     });
-
+ 
+    logger.info("Order created", { orderId: takerOrder._id, userId, side, type, symbol, price, qty });
+ 
     let remainingQty = qty;
-
-    // ────────────────────────────────────────────────
-    // 5. MATCH AGAINST REDIS ORDERBOOK
-    //
-    //  BUY  taker → match against SELL book (sorted ASC  by price, lowest ask first)
-    //  SELL taker → match against BUY  book (sorted DESC by price, highest bid first)
-    // ────────────────────────────────────────────────
+    const fills      = [];
+ 
     const oppositeSide = side === "buy" ? "sell" : "buy";
-    const bookKey = `orderbook:${symbol}:${oppositeSide}`;
-
-    // Retrieve ordered IDs from the sorted set
-    // SELL book: zrange (ASC) gives cheapest sellers first  ✓
-    // BUY  book: zrevrange (DESC) gives highest bidders first ✓
-    const orderedIds =
-      oppositeSide === "sell"
-        ? await redis.zrange(bookKey, 0, -1)              // lowest ask first
-        : await redis.zrange(bookKey, 0, -1, "REV");      // highest bid first
-
-    for (const makerId of orderedIds) {
+    const bookKey      = `orderbook:${symbol}:${oppositeSide}`;
+ 
+    const makerIds = oppositeSide === "sell"
+      ? await redis.zrange(bookKey, 0, -1)
+      : await redis.zrange(bookKey, 0, -1, "REV");
+ 
+    for (const makerId of makerIds) {
       if (remainingQty <= 0) break;
-
+ 
       const makerOrder = await OrderModel.findById(makerId);
-      if (!makerOrder || makerOrder.status === "filled" || makerOrder.status === "cancelled") {
-        await redis.zrem(bookKey, makerId); // clean stale entries
+      if (!makerOrder || ["filled", "cancelled"].includes(makerOrder.status)) {
+        await redis.zrem(bookKey, makerId);
         continue;
       }
-
+ 
       const makerPrice = makerOrder.price;
-
-      // Price compatibility check
       if (type === "limit") {
-        if (side === "buy"  && price < makerPrice) break; // can't afford cheapest ask
-        if (side === "sell" && price > makerPrice) break; // won't sell below best bid
+        if (side === "buy"  && price < makerPrice) break;
+        if (side === "sell" && price > makerPrice) break;
       }
-      // Market orders match at any price
-
-      const makerAvailable = makerOrder.qty - (makerOrder.filledQty || 0);
-      const tradeQty = Math.min(remainingQty, makerAvailable);
-      const tradePrice = makerPrice; // fills always execute at maker's price
-
-      // ── Create fill record ──────────────────────────────
-      await FillModel.create({
-        stockId,
-        price: tradePrice,
-        qty: tradeQty,
+ 
+      if (side === "buy" && type === "market") {
+        const fw       = await redis.hgetall(walletKey);
+        const avl      = Number(fw.INR_available ?? 0);
+        const fillCost = makerPrice * Math.min(remainingQty, makerOrder.qty - (makerOrder.filledQty ?? 0));
+        if (avl < fillCost) break;
+        await adjustBalance(userId, "INR", "available", -fillCost);
+        await adjustBalance(userId, "INR", "locked",     fillCost);
+      }
+ 
+      const makerAvailable = makerOrder.qty - (makerOrder.filledQty ?? 0);
+      const tradeQty       = Math.min(remainingQty, makerAvailable);
+      const tradeCost      = makerPrice * tradeQty;
+      const buyerId        = side === "buy"  ? userId : String(makerOrder.userId);
+      const sellerId       = side === "sell" ? userId : String(makerOrder.userId);
+ 
+      const fill = await FillModel.create({
+        stockId, symbol,
+        price: makerPrice, qty: tradeQty,
         buyOrderId:  side === "buy"  ? takerOrder._id : makerOrder._id,
         sellOrderId: side === "sell" ? takerOrder._id : makerOrder._id,
       });
-
-      // ── Settle wallets ──────────────────────────────────
-      const tradeCost = tradePrice * tradeQty;
-      const buyerWalletKey  = side === "buy"  ? walletKey : `wallet:${makerOrder.userId}`;
-      const sellerWalletKey = side === "sell" ? walletKey : `wallet:${makerOrder.userId}`;
-
-      // Buyer: deduct locked INR → credit asset
-      await redis.hincrbyfloat(buyerWalletKey,  "INR_locked",             -tradeCost);
-      await redis.hincrbyfloat(buyerWalletKey,  `${baseAsset}_available`,  tradeQty);
-
-      // Seller: deduct locked asset → credit INR
-      await redis.hincrbyfloat(sellerWalletKey, `${baseAsset}_locked`,    -tradeQty);
-      await redis.hincrbyfloat(sellerWalletKey, "INR_available",           tradeCost);
-
-      // For market BUY we lock INR at fill time (no pre-lock above)
-      if (side === "buy" && type === "market") {
-        const availableINR = Number((await redis.hget(walletKey, "INR_available")) || 0);
-        if (availableINR < tradeCost) {
-          // Rollback partial fill attempt if funds run out
-          break;
-        }
-        await redis.hincrbyfloat(walletKey, "INR_available", -tradeCost);
-      }
-
-      // ── Update maker order ──────────────────────────────
-      makerOrder.filledQty = (makerOrder.filledQty || 0) + tradeQty;
-      makerOrder.status =
-        makerOrder.filledQty >= makerOrder.qty ? "filled" : "partially_filled";
+      fills.push(fill);
+ 
+      logger.info("Fill created", { fillId: fill._id, symbol, price: makerPrice, qty: tradeQty });
+ 
+      // ── Emit real-time trade to subscribers ──
+      emitTrade(fill);
+ 
+      await settleFill(buyerId, sellerId, baseAsset, tradeQty, tradeCost);
+ 
+      makerOrder.filledQty = (makerOrder.filledQty ?? 0) + tradeQty;
+      makerOrder.status    = makerOrder.filledQty >= makerOrder.qty ? "filled" : "partially_filled";
       await makerOrder.save();
-
-      if (makerOrder.status === "filled") {
-        await redis.zrem(bookKey, makerId);
-      }
-
+ 
+      // ── Emit maker order update to its owner ──
+      emitOrderUpdate(makerOrder);
+ 
+      if (makerOrder.status === "filled") await redis.zrem(bookKey, makerId);
+ 
       remainingQty -= tradeQty;
     }
-
-    // ────────────────────────────────────────────────
-    // 6. UPDATE TAKER ORDER STATUS
-    // ────────────────────────────────────────────────
+ 
     takerOrder.filledQty = qty - remainingQty;
-
-    if (remainingQty === 0) {
-      takerOrder.status = "filled";
-    } else if (takerOrder.filledQty > 0) {
-      takerOrder.status = "partially_filled";
-    } else {
-      takerOrder.status = "open";
-    }
-
-    // ────────────────────────────────────────────────
-    // 7. ADD UNFILLED LIMIT ORDER TO ORDERBOOK
-    // ────────────────────────────────────────────────
-    if (remainingQty > 0 && type === "limit") {
-      const myBookKey = `orderbook:${symbol}:${side}`;
-
-      // BUY  book: stored as positive score  (zrevrange gives highest bid first)
-      // SELL book: stored as positive score  (zrange   gives lowest  ask first)
-      await redis.zadd(myBookKey, price, takerOrder._id.toString());
-    }
-
-    // ────────────────────────────────────────────────
-    // 8. CANCEL UNFILLED MARKET ORDER & RELEASE LOCKS
-    // ────────────────────────────────────────────────
+    takerOrder.status    = remainingQty === 0 ? "filled"
+      : takerOrder.filledQty > 0 ? "partially_filled" : "open";
+ 
+    if (remainingQty > 0 && type === "limit")
+      await redis.zadd(`orderbook:${symbol}:${side}`, price, takerOrder._id.toString());
+ 
     if (remainingQty > 0 && type === "market") {
       takerOrder.status = "cancelled";
-
-      // Release any remaining locked balance
-      if (side === "sell" && remainingQty > 0) {
-        await redis.hincrbyfloat(walletKey, `${baseAsset}_locked`,    -remainingQty);
-        await redis.hincrbyfloat(walletKey, `${baseAsset}_available`,  remainingQty);
+      if (side === "sell") {
+        await adjustBalance(userId, baseAsset, "locked",    -remainingQty);
+        await adjustBalance(userId, baseAsset, "available",  remainingQty);
       }
-      // For market buy, INR was locked per-fill so nothing extra to release
     }
-
-    // ────────────────────────────────────────────────
-    // 9. RELEASE OVER-LOCKED INR FOR PARTIAL LIMIT BUY
-    //    (locked full qty*price upfront, but filled at maker prices
-    //     which may be lower — refund the difference)
-    // ────────────────────────────────────────────────
-    if (side === "buy" && type === "limit" && remainingQty > 0) {
-      // The remaining unfilled portion stays locked (it's on the book)
-      // Nothing extra to release — locked amount matches remaining open qty
-    }
-
+ 
     await takerOrder.save();
+ 
+    // ── Emit taker order update + updated orderbook ──
+    emitOrderUpdate(takerOrder);
+    await emitOrderbookUpdate(symbol);
+ 
+    logger.info("Order processed", { orderId: takerOrder._id, status: takerOrder.status, fills: fills.length });
+ 
+    return res.status(201).json({ message: "Order processed", order: takerOrder, fills });
+  } catch (err) {
+    logger.error("placeOrder failed", { error: err.message, stack: err.stack });
+    return res.status(500).json({ message: err.message });
+  }
+};
+ 
+// ─────────────────────────────────────────────────────────────
+// DELETE /api/orders/:orderId
+// ─────────────────────────────────────────────────────────────
+export const cancelOrder = async (req, res) => {
+  try {
+    const userId      = req.userId;
+    const { orderId } = req.params;
+ 
+    const order = await OrderModel.findById(orderId);
+    if (!order)
+      return res.status(404).json({ message: "Order not found" });
+    if (String(order.userId) !== String(userId))
+      return res.status(403).json({ message: "Not your order" });
+    if (!["open", "partially_filled"].includes(order.status))
+      return res.status(400).json({ message: `Cannot cancel a ${order.status} order` });
+ 
+    const unfilledQty = order.qty - (order.filledQty ?? 0);
+    const market      = await redis.hgetall(`market:${order.symbol}`);
+    const baseAsset   = market?.baseAsset ?? order.symbol.split("/")[0];
+ 
+    if (order.side === "buy") {
+      const refundINR = order.price * unfilledQty;
+      await adjustBalance(userId, "INR", "locked",    -refundINR);
+      await adjustBalance(userId, "INR", "available",  refundINR);
+    } else {
+      await adjustBalance(userId, baseAsset, "locked",    -unfilledQty);
+      await adjustBalance(userId, baseAsset, "available",  unfilledQty);
+    }
+ 
+    await redis.zrem(`orderbook:${order.symbol}:${order.side}`, orderId);
+    order.status = "cancelled";
+    await order.save();
+ 
+    // ── Emit cancel to user + updated orderbook ──
+    emitOrderUpdate(order);
+    await emitOrderbookUpdate(order.symbol);
+ 
+    logger.info("Order cancelled", { orderId, userId });
+ 
+    return res.status(200).json({ message: "Order cancelled", order });
+  } catch (err) {
+    logger.error("cancelOrder failed", { error: err.message });
+    return res.status(500).json({ message: err.message });
+  }
+};
 
-    return res.status(201).json({
-      message: "Order processed",
-      order: takerOrder,
+// ─────────────────────────────────────────────────────────────
+// GET /api/orders
+// My orders list — query: ?status=open&symbol=BTC/INR&side=buy&page=1&limit=20
+// ─────────────────────────────────────────────────────────────
+export const getMyOrders = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { status, symbol, side, page = 1, limit = 20 } = req.query;
+
+    const filter = { userId };
+    if (status) filter.status = status;
+    if (symbol) filter.symbol = symbol.toUpperCase();
+    if (side)   filter.side   = side;
+
+    const skip   = (Number(page) - 1) * Number(limit);
+    const total  = await OrderModel.countDocuments(filter);
+    const orders = await OrderModel.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .lean();
+
+    return res.status(200).json({ total, page: Number(page), pages: Math.ceil(total / Number(limit)), orders });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/orders/:orderId
+// Single order + its fills
+// ─────────────────────────────────────────────────────────────
+export const getOrder = async (req, res) => {
+  try {
+    const userId      = req.userId;
+    const { orderId } = req.params;
+
+    const order = await OrderModel.findById(orderId).lean();
+    if (!order)
+      return res.status(404).json({ message: "Order not found" });
+    if (String(order.userId) !== String(userId))
+      return res.status(403).json({ message: "Not your order" });
+
+    const fills = await FillModel.find({
+      $or: [{ buyOrderId: orderId }, { sellOrderId: orderId }],
+    }).lean();
+
+    return res.status(200).json({ order, fills });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/orderbook/:symbol
+// L2 price ladder — public
+// Query: ?depth=20
+//
+// Response shape (what every frontend expects):
+// {
+//   symbol: "BTC/INR",
+//   bids: [{ price, qty }, ...],   ← sorted high→low
+//   asks: [{ price, qty }, ...],   ← sorted low→high
+// }
+// ─────────────────────────────────────────────────────────────
+export const getOrderbook = async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const depth  = Math.min(Number(req.query.depth ?? 20), 100);
+
+    const [buyRaw, sellRaw] = await Promise.all([
+      redis.zrange(`orderbook:${symbol}:buy`,  0, depth - 1, "REV", "WITHSCORES"),
+      redis.zrange(`orderbook:${symbol}:sell`, 0, depth - 1,        "WITHSCORES"),
+    ]);
+
+    // Aggregate qty at same price level
+    async function buildLevels(raw) {
+      const priceMap = new Map();
+      for (let i = 0; i < raw.length; i += 2) {
+        const orderId = raw[i];
+        const price   = Number(raw[i + 1]);
+        const order   = await OrderModel.findById(orderId, "qty filledQty").lean();
+        if (!order) continue;
+        const remaining = order.qty - (order.filledQty ?? 0);
+        priceMap.set(price, (priceMap.get(price) ?? 0) + remaining);
+      }
+      return Array.from(priceMap.entries()).map(([price, qty]) => ({ price, qty }));
+    }
+
+    const [bids, asks] = await Promise.all([buildLevels(buyRaw), buildLevels(sellRaw)]);
+
+    return res.status(200).json({ symbol, bids, asks });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/trades/:symbol
+// Recent fills (public trade history / last trades tape)
+// Query: ?limit=50
+// ─────────────────────────────────────────────────────────────
+export const getRecentTrades = async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const limit  = Math.min(Number(req.query.limit ?? 50), 200);
+
+    const trades = await FillModel
+      .find({ symbol })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .select("price qty createdAt buyOrderId sellOrderId")
+      .lean();
+
+    return res.status(200).json({ symbol, trades });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/ticker/:symbol
+// 24h stats — last price, 24h high/low/volume/change
+// Powers the price header on every trading page
+// ─────────────────────────────────────────────────────────────
+export const getTicker = async (req, res) => {
+  try {
+    const symbol  = req.params.symbol.toUpperCase();
+    const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const fills = await FillModel
+      .find({ symbol, createdAt: { $gte: since24 } })
+      .sort({ createdAt: 1 })
+      .select("price qty createdAt")
+      .lean();
+
+    if (fills.length === 0) {
+      return res.status(200).json({ symbol, lastPrice: null, message: "No trades in last 24h" });
+    }
+
+    const prices    = fills.map(f => f.price);
+    const lastPrice = prices[prices.length - 1];
+    const openPrice = prices[0];
+    const high24h   = Math.max(...prices);
+    const low24h    = Math.min(...prices);
+    const volume24h = fills.reduce((sum, f) => sum + f.qty, 0);
+    const change24h = ((lastPrice - openPrice) / openPrice) * 100;
+
+    return res.status(200).json({
+      symbol,
+      lastPrice,
+      openPrice,
+      high24h,
+      low24h,
+      volume24h: Number(volume24h.toFixed(8)),
+      change24h: Number(change24h.toFixed(2)),
+      trades24h: fills.length,
     });
-  } catch (error) {
-    console.error("[placeOrder] error:", error);
-    return res.status(500).json({ message: error.message });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/tickers
+// All market tickers at once — for the markets list page
+// ─────────────────────────────────────────────────────────────
+export const getAllTickers = async (req, res) => {
+  try {
+    const since24  = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    // Get all active market symbols from Redis keys
+    const keys    = await redis.keys("market:*");
+    const symbols = keys.map(k => k.replace("market:", ""));
+
+    const tickers = await Promise.all(
+      symbols.map(async (symbol) => {
+        const market = await redis.hgetall(`market:${symbol}`);
+        if (market.status !== "active") return null;
+
+        const fills = await FillModel
+          .find({ symbol, createdAt: { $gte: since24 } })
+          .select("price qty")
+          .lean();
+
+        if (fills.length === 0) {
+          return { symbol, lastPrice: null, change24h: 0, volume24h: 0 };
+        }
+
+        const prices    = fills.map(f => f.price);
+        const lastPrice = prices[prices.length - 1];
+        const openPrice = prices[0];
+        const volume24h = fills.reduce((sum, f) => sum + f.qty, 0);
+        const change24h = ((lastPrice - openPrice) / openPrice) * 100;
+
+        return {
+          symbol,
+          lastPrice,
+          change24h:  Number(change24h.toFixed(2)),
+          volume24h:  Number(volume24h.toFixed(8)),
+          high24h:    Math.max(...prices),
+          low24h:     Math.min(...prices),
+        };
+      })
+    );
+
+    return res.status(200).json({ tickers: tickers.filter(Boolean) });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/ohlcv/:symbol
+// Candlestick data for the price chart
+// Query: ?interval=1m|5m|15m|1h|4h|1d  &limit=100
+// ─────────────────────────────────────────────────────────────
+export const getOHLCV = async (req, res) => {
+  try {
+    const symbol   = req.params.symbol.toUpperCase();
+    const interval = req.query.interval ?? "1h";
+    const limit    = Math.min(Number(req.query.limit ?? 100), 1000);
+
+    // Map interval string to milliseconds
+    const intervalMap = {
+      "1m":  60_000,
+      "5m":  300_000,
+      "15m": 900_000,
+      "1h":  3_600_000,
+      "4h":  14_400_000,
+      "1d":  86_400_000,
+    };
+    const intervalMs = intervalMap[interval];
+    if (!intervalMs)
+      return res.status(400).json({ message: `Invalid interval. Use: ${Object.keys(intervalMap).join(", ")}` });
+
+    const since = new Date(Date.now() - intervalMs * limit);
+
+    const fills = await FillModel
+      .find({ symbol, createdAt: { $gte: since } })
+      .sort({ createdAt: 1 })
+      .select("price qty createdAt")
+      .lean();
+
+    if (fills.length === 0)
+      return res.status(200).json({ symbol, interval, candles: [] });
+
+    // Group fills into candles
+    const candleMap = new Map();
+
+    for (const fill of fills) {
+      const ts     = fill.createdAt.getTime();
+      const bucket = Math.floor(ts / intervalMs) * intervalMs;
+
+      if (!candleMap.has(bucket)) {
+        candleMap.set(bucket, {
+          time:   bucket,
+          open:   fill.price,
+          high:   fill.price,
+          low:    fill.price,
+          close:  fill.price,
+          volume: fill.qty,
+        });
+      } else {
+        const c    = candleMap.get(bucket);
+        c.high     = Math.max(c.high, fill.price);
+        c.low      = Math.min(c.low,  fill.price);
+        c.close    = fill.price;
+        c.volume  += fill.qty;
+      }
+    }
+
+    const candles = Array.from(candleMap.values()).sort((a, b) => a.time - b.time);
+
+    return res.status(200).json({ symbol, interval, candles });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
   }
 };
