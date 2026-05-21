@@ -57,7 +57,7 @@ export const createWallet = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const getWallet = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
 
     let wallet = await getRedisWallet(userId);
 
@@ -87,7 +87,7 @@ export const getWallet = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const deposit = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
     const { asset, amount, txHash, reference } = req.body;
 
     const upperAsset = asset?.toUpperCase();
@@ -108,6 +108,7 @@ export const deposit = async (req, res) => {
       { $inc: { [`balances.${upperAsset}.available`]: parsedAmount } },
       { new: true }
     );
+    console.log(wallet);
     if (!wallet) {
       return res.status(404).json({ message: "Wallet not found" });
     }
@@ -147,7 +148,7 @@ export const deposit = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const withdraw = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
     const { asset, amount } = req.body;
 
     const upperAsset = asset?.toUpperCase();
@@ -222,7 +223,7 @@ export const withdraw = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const getTransactions = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
     const { asset, type, page = 1, limit = 20 } = req.query;
 
     const filter = { userId };

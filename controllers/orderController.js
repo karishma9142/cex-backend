@@ -29,10 +29,11 @@ async function settleFill(buyerId, sellerId, asset, tradeQty, tradeCost) {
 // ─────────────────────────────────────────────────────────────
 export const placeOrder = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
     // body is already validated + sanitised by Zod middleware
     const { side, type, stockId, symbol, price, qty } = req.body;
- 
+
+    
     const market = await redis.hgetall(`market:${symbol}`);
     if (!market || Object.keys(market).length === 0)
       return res.status(404).json({ message: `Market ${symbol} not found` });
@@ -173,7 +174,7 @@ export const placeOrder = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const cancelOrder = async (req, res) => {
   try {
-    const userId      = req.userId;
+    const userId      = req.user_id;
     const { orderId } = req.params;
  
     const order = await OrderModel.findById(orderId);
@@ -220,7 +221,7 @@ export const cancelOrder = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const getMyOrders = async (req, res) => {
   try {
-    const userId = req.userId;
+    const userId = req.user_id;
     const { status, symbol, side, page = 1, limit = 20 } = req.query;
 
     const filter = { userId };
@@ -248,7 +249,7 @@ export const getMyOrders = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const getOrder = async (req, res) => {
   try {
-    const userId      = req.userId;
+    const userId      = req.user_id;
     const { orderId } = req.params;
 
     const order = await OrderModel.findById(orderId).lean();

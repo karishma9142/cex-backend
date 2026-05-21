@@ -9,7 +9,7 @@
  *   Structured logging (winston)
  *
  * npm install express mongoose ioredis socket.io jsonwebtoken bcrypt
- *             dotenv cors express-rate-limit zod winston
+ *            dotenv cors express-rate-limit zod winston
  */
 
 import http     from "http";

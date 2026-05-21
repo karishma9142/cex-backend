@@ -17,7 +17,7 @@ export function validate(schema) {
     const result = schema.safeParse(req.body);
 
     if (!result.success) {
-      const errors = result.error.errors.map(e => ({
+      const errors = result.error.issues.map(e => ({
         field:   e.path.join("."),
         message: e.message,
       }));
@@ -77,7 +77,7 @@ export const placeOrderSchema = z.object({
   { message: "price is required for limit orders", path: ["price"] }
 );
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 // MARKETS (admin)
 // ─────────────────────────────────────────────────────────────
 export const createMarketSchema = z.object({
