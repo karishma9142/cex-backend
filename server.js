@@ -18,10 +18,11 @@ import mongoose from "mongoose";
 import dotenv   from "dotenv";
 import cors     from "cors";
 
-import authRoutes   from "./routes/authRoutes.js";
-import walletRoutes from "./routes/walletRoutes.js";
-import marketRoutes from "./routes/marketRoutes.js";
-import orderRoutes  from "./routes/orderRoutes.js";
+import authRoutes       from "./routes/authRoutes.js";
+import walletRoutes     from "./routes/walletRoutes.js";
+import marketRoutes     from "./routes/marketRoutes.js";
+import orderRoutes      from "./routes/orderRoutes.js";
+import marketDataRoutes from "./routes/marketDataRoutes.js";
 
 import { initSocket }      from "./socket.js";
 import { seedRedis }       from "./utils//seedRedis.js";
@@ -56,11 +57,11 @@ app.use("/api/auth",      authRoutes);
 app.use("/api/wallet",    walletRoutes);
 app.use("/api/markets",   marketRoutes);
 app.use("/api/orders",    orderRoutes);
-app.use("/api/orderbook", orderRoutes);
-app.use("/api/trades",    orderRoutes);
-app.use("/api/ticker",    orderRoutes);
-app.use("/api/tickers",   orderRoutes);
-app.use("/api/ohlcv",     orderRoutes);
+// marketDataRoutes defines its own /orderbook, /trades, /ticker, /tickers,
+// /ohlcv segments internally, so it's mounted once at bare "/api" — mounting
+// it again under each of those prefixes (as before) doubled every path,
+// e.g. GET /api/trades/trades/:symbol instead of GET /api/trades/:symbol.
+app.use("/api",           marketDataRoutes);
 
 // ── Health check ────────────────────────────────────────────
 app.get("/health", (_req, res) => {

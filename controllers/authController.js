@@ -84,12 +84,18 @@ export const Signup = async (req, res) => {
 
 
 
-        const token = jwt.sign({ user_id: newUser._id }, process.env.JWT_SECRET);
-        console.log(token);
+        const token = jwt.sign({ user_id: newUser._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
         return res.status(200).json({
             msg: "user created",
             token: token,
-            username: newUser.userName
+            username: newUser.userName,
+            user: {
+                id: newUser._id,
+                fullName: newUser.fullName,
+                userName: newUser.userName,
+                email: newUser.email,
+                role: newUser.role,
+            }
         })
 
     } catch (error) {
@@ -139,12 +145,18 @@ export const Signin = async (req, res) => {
 
         const token = jwt.sign({
             user_id: findUser._id
-        }, process.env.JWT_SECRET);
+        }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
-        console.log(token);
         return res.status(200).json({
             msg: "sign in sucessfully",
-            token: token
+            token: token,
+            user: {
+                id: findUser._id,
+                fullName: findUser.fullName,
+                userName: findUser.userName,
+                email: findUser.email,
+                role: findUser.role,
+            }
         })
 
     } catch (error) {

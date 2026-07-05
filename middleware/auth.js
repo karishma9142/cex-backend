@@ -2,17 +2,17 @@ import jwt from "jsonwebtoken";
 
 export const Auth = async (req , res,next) => {
     try {
-    const token = req.headers.authorization;
-    if (!token) {
+    const header = req.headers.authorization;
+    if (!header) {
       return res.status(401).json({
         msg: "No token provided"
       });
     }
- 
-    console.log(token)
+
+    // Accept both "Bearer <token>" (standard) and a raw token
+    const token = header.startsWith("Bearer ") ? header.slice(7) : header;
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log(decoded)
     req.user_id = decoded.user_id;
 
     next();

@@ -7,7 +7,7 @@
  * Install: npm install express-rate-limit
  */
 
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 
 // ── Helper: standard JSON error response ─────────────────────
 const handler = (req, res) =>
@@ -36,7 +36,7 @@ export const authLimiter = rateLimit({
 export const orderLimiter = rateLimit({
   windowMs:        60 * 1000,
   max:             60,
-  keyGenerator:    (req) => req.userId ?? req.ip,
+  keyGenerator:    (req) => req.user_id ?? ipKeyGenerator(req),
   standardHeaders: true,
   legacyHeaders:   false,
   handler,
@@ -49,7 +49,7 @@ export const orderLimiter = rateLimit({
 export const walletLimiter = rateLimit({
   windowMs:        60 * 1000,
   max:             20,
-  keyGenerator:    (req) => req.userId ?? req.ip,
+  keyGenerator:    (req) => req.user_id ?? ipKeyGenerator(req),
   standardHeaders: true,
   legacyHeaders:   false,
   handler,

@@ -10,7 +10,7 @@ import { Auth } from "../middleware/auth.js";
 
 const walletRouter = express.Router();
 
-walletRouter.post("/create",          createWallet);         // called after register
+walletRouter.post("/create",          Auth, createWallet);   // called after register
 walletRouter.get("/",                 Auth, getWallet);       // view balances
 walletRouter.post("/deposit",         Auth, deposit);         // add funds
 walletRouter.post("/withdraw",        Auth, withdraw);        // remove funds

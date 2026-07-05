@@ -35,7 +35,7 @@ async function getRedisWallet(userId) {
 // ─────────────────────────────────────────────────────────────
 export const createWallet = async (req, res) => {
   try {
-    const { userId } = req.body;
+    const userId = req.user_id;
 
     const existing = await WalletModel.findOne({ userId });
     if (existing) {

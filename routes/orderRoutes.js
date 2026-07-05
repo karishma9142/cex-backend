@@ -2,8 +2,6 @@ import express from "express";
 import {
   placeOrder, cancelOrder,
   getMyOrders, getOrder,
-  getOrderbook, getRecentTrades,
-  getTicker, getAllTickers, getOHLCV,
 } from "../controllers/orderController.js";
 import { Auth }             from "../middleware/auth.js";
 import { orderLimiter }               from "../middleware/rateLimiter.js";
@@ -11,14 +9,7 @@ import { validate, placeOrderSchema } from "../middleware/validators.js";
 
 const router = express.Router();
 
-// ── Public market data ────────────────────────────────────────
-router.get("/orderbook/:symbol",  getOrderbook);
-router.get("/trades/:symbol",     getRecentTrades);
-router.get("/ticker/:symbol",     getTicker);
-router.get("/tickers",            getAllTickers);
-router.get("/ohlcv/:symbol",      getOHLCV);
-
-// ── Protected ─────────────────────────────────────────────────
+// ── Protected — mounted at /api/orders in server.js ────────────
 router.post(
   "/",
   Auth,
